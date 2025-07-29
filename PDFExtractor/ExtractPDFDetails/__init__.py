@@ -11,7 +11,6 @@ from datetime import datetime
 import math
 import traceback
 import requests
-import urllib3
 
 # Load environment variables from .env file in the same directory
 load_dotenv()
@@ -24,30 +23,54 @@ TENANT_ID = os.environ.get("TENANT_ID")
 LIST_NAME = os.environ.get("SHAREPOINT_LIST_NAME")
 WELLPLANAON_LIST_NAME = os.environ.get("SHAREPOINT_WELLPLANAON_LIST_NAME")
 OUTPUT_LIBRARY = os.environ.get("SHAREPOINT_OUTPUT_LIBRARY")
-X_API_KEY = os.environ.get("X_API_KEY")
-API_PROXY_BASE = os.environ.get("API_PROXY_BASE")
+GRAPH_BASE = os.getenv("GRAPH_BASE", "https://graph.microsoft.com/v1.0")  # Default fallback
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-def get_access_token():
-    token_url = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/token"
+def get_graph_token():
+    token_url = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
     payload = {
         "grant_type": "client_credentials",
         "client_id": CLIENT_ID,
         "client_secret": CLIENT_SECRET,
-        "resource": "https://slb001.sharepoint.com"
+        "scope": "https://graph.microsoft.com/.default"
     }
     headers = {"Accept": "application/json"}
-    resp = requests.post(token_url, data=payload, headers=headers, verify=False)
+    resp = requests.post(token_url, data=payload, headers=headers)
     resp.raise_for_status()
     return resp.json()["access_token"]
 
-def get_headers():
+def graph_headers():
     return {
-        "Authorization": f"Bearer {get_access_token()}",
-        "x-apikey": X_API_KEY,
+        "Authorization": f"Bearer {get_graph_token()}",
         "Accept": "application/json"
     }
+
+def get_site_id():
+    # Extract tenant domain and site name from full site URL
+    site_hostname = SITE_URL.split("/")[2]  # "slb001.sharepoint.com"
+    site_path = "/" + "/".join(SITE_URL.split("/")[3:])  # "/sites/ADNOCDevelopment
+    
+    # Format URL as per Microsoft Graph recommendations
+    url = f"{GRAPH_BASE}/sites/{site_hostname}:{site_path}"
+    
+    headers = graph_headers()
+    resp = requests.get(url, headers=headers)
+    resp.raise_for_status()
+    
+    site_id = resp.json()["id"]
+   # print(f"Resolved Site ID: {site_id}")
+    return site_id
+
+
+def get_list_id(site_id, list_name):
+    url = f"{GRAPH_BASE}/sites/{site_id}/lists"
+    headers = graph_headers()
+    resp = requests.get(url, headers=headers)
+    resp.raise_for_status()
+    for l in resp.json().get("value", []):
+        if l["name"] == list_name:
+           # print(f"Resolved List ID for '{list_name}': {l['id']}")
+            return l["id"]
+    raise Exception(f"List '{list_name}' not found in site {site_id}")
 
 def safe_strip(val):
     if val is None:
@@ -57,30 +80,35 @@ def safe_strip(val):
     return str(val).strip()
 
 def push_to_sharepoint(values, max_retries=3):
-    url = f"{API_PROXY_BASE}/{SITE_NAME}/_api/web/lists/GetByTitle('{LIST_NAME}')/items"
-    headers = get_headers()
+    site_id = get_site_id()
+    list_id = get_list_id(site_id, LIST_NAME)
+    url = f"{GRAPH_BASE}/sites/{site_id}/lists/{list_id}/items"
+    headers = graph_headers()
+    headers["Content-Type"] = "application/json"
     for value in values:
         item_properties = {
-            "Title": str(value.get("Date", "")),
-            "Rig": str(value.get("Rig", "")),
-            "Well": str(value.get("Well", "")),
-            "BP": str(value.get("BP", "")),
-            "EP1": str(value.get("EP1", "")),
-            "Actuals": str(value.get("Actuals", "")),
-            "NextLOC": str(value.get("NextLOC", "")),
-            "NextMoveDate": str(value.get("NextMoveDate", "")),
+            "fields": {
+                "Title": str(value.get("Date", "")),
+                "Rig": str(value.get("Rig", "")),
+                "Well": str(value.get("Well", "")),
+                "BP": str(value.get("BP", "")),
+                "EP": str(value.get("EP1", "")),
+                "Actuals": str(value.get("Actuals", "")),
+                "NextLOC": str(value.get("NextLOC", "")),
+                "NextMoveDate": str(value.get("NextMoveDate", "")),
+            }
         }
         retries = 0
         while retries < max_retries:
             try:
-                resp = requests.post(url, headers=headers, json=item_properties, verify=False)
+                resp = requests.post(url, headers=headers, json=item_properties)
                 if resp.status_code == 503:
                     retries += 1
                     wait_time = 2 ** retries
                     print(f"503 error, retrying in {wait_time} seconds...")
                     time.sleep(wait_time)
                 elif resp.ok:
-                    print(f"Successfully added Well: {item_properties.get('Well', '')}")
+                    print(f"Successfully added Well: {item_properties['fields'].get('Well', '')}")
                     break
                 else:
                     print(f"Failed to add item to SharePoint: {resp.text}")
@@ -90,18 +118,20 @@ def push_to_sharepoint(values, max_retries=3):
                 break
 
 def fetch_filtered_wellplanaon_entries(rig, next_loc, max_retries=3):
-    url = f"{API_PROXY_BASE}/{SITE_NAME}/_api/web/lists/GetByTitle('{WELLPLANAON_LIST_NAME}')/items"
-    headers = get_headers()
-    params = {
-        "$filter": f"RigName eq '{rig}' and WellName eq '{next_loc}'"
-    }
-    resp = requests.get(url, headers=headers, params=params, verify=False)
+    site_id = get_site_id()
+    list_id = get_list_id(site_id, WELLPLANAON_LIST_NAME)
+    url = f"{GRAPH_BASE}/sites/{site_id}/lists/{list_id}/items"
+    headers = graph_headers()
+    filter_query = f"fields/RigName eq '{rig}' and fields/WellName eq '{next_loc}'"
+    params = {"$filter": filter_query}
+    resp = requests.get(url, headers=headers, params=params)
     resp.raise_for_status()
     items = resp.json().get("value", [])
     results = []
     for item in items:
-        start_date = item.get('StartDate')
-        end_date = item.get('EndDate')
+        fields = item.get("fields", {})
+        start_date = fields.get('StartDate')
+        end_date = fields.get('EndDate')
         diff_days = ""
         try:
             if start_date and end_date:
@@ -110,18 +140,22 @@ def fetch_filtered_wellplanaon_entries(rig, next_loc, max_retries=3):
                 diff_days = (end_dt - start_dt).days
         except Exception as e:
             diff_days = f"Error: {e}"
-        item["DaysDiff"] = diff_days
-        results.append(item)
+        fields["DaysDiff"] = diff_days
+        fields["ID"] = item.get("id")
+        results.append(fields)
     return results
 
 def update_sharepoint_list_item(item_id, start_date, end_date):
-    url = f"{API_PROXY_BASE}/{SITE_NAME}/_api/web/lists/GetByTitle('{WELLPLANAON_LIST_NAME}')/items({item_id})"
-    headers = get_headers()
+    site_id = get_site_id()
+    list_id = get_list_id(site_id, WELLPLANAON_LIST_NAME)
+    url = f"{GRAPH_BASE}/sites/{site_id}/lists/{list_id}/items/{item_id}/fields"
+    headers = graph_headers()
+    headers["Content-Type"] = "application/json"
     payload = {
         "StartDate": start_date.strftime("%Y-%m-%dT%H:%M:%S"),
         "EndDate": end_date.strftime("%Y-%m-%dT%H:%M:%S")
     }
-    resp = requests.put(url, headers=headers, json=payload, verify=False)
+    resp = requests.patch(url, headers=headers, json=payload)
     resp.raise_for_status()
     print(f"Updated item ID {item_id} with StartDate {start_date} and EndDate {end_date}")
 
@@ -134,10 +168,25 @@ def upload_no_entries_log_to_sharepoint(no_entries_log, file_name_prefix="NoEntr
     excel_buffer = io.BytesIO()
     df.to_excel(excel_buffer, index=False)
     excel_buffer.seek(0)
-    url = f"{API_PROXY_BASE}/{SITE_NAME}/_api/web/GetFolderByServerRelativeUrl('/{OUTPUT_LIBRARY}')/Files/add(url='{file_name}',overwrite=true)"
-    headers = get_headers()
-    files = {'file': (file_name, excel_buffer, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')}
-    resp = requests.post(url, headers=headers, files=files, verify=False)
+    site_id = get_site_id()
+    # Find the drive (document library) by name
+    drive_url = f"{GRAPH_BASE}/sites/{site_id}/drives"
+    headers = graph_headers()
+    resp = requests.get(drive_url, headers=headers)
+    resp.raise_for_status()
+    drives = resp.json().get("value", [])
+    drive_id = None
+    for d in drives:
+        if d.get("name") == OUTPUT_LIBRARY:
+            drive_id = d["id"]
+            break
+    if not drive_id:
+        print(f"Drive (library) '{OUTPUT_LIBRARY}' not found.")
+        return
+    upload_url = f"{GRAPH_BASE}/drives/{drive_id}/root:/{file_name}:/content"
+    headers = graph_headers()
+    headers["Content-Type"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    resp = requests.put(upload_url, headers=headers, data=excel_buffer.getvalue())
     resp.raise_for_status()
     print(f"Uploaded file to SharePoint: {file_name}")
 
@@ -254,11 +303,7 @@ def extract_tables_from_pdf(pdf_stream):
                                                     elif len(parts) == 3 and len(parts[2]) == 3:
                                                         # Incomplete year, try to guess or skip
                                                         print(f"Warning: Incomplete year in Next Move date: {date_str}")
-                                                        # Optionally, you could try to fix by adding a '0' or '5' at the end, or skip:
-                                                        # date_str_fixed = date_str + "5"  # or some logic
-                                                        # NextMoveDate.append(date_str_fixed)
-                                                        NextMoveDate.append(date_str)  # Or skip, or log for review
-                                                       
+                                                        NextMoveDate.append(date_str)
                                                     else:
                                                         # Unexpected format
                                                         print(f"Warning: Unexpected Next Move date format: {date_str}")
@@ -285,7 +330,6 @@ def extract_tables_from_pdf(pdf_stream):
     doc.close()
     return all_values
 
-
 def main(req: func.HttpRequest) -> func.HttpResponse:
     logging.info("Python HTTP trigger function processed a request.")
 
@@ -297,8 +341,6 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 "No PDF content found in request body", status_code=400
             )
         
-         # Optionally, get file name from headers or query params
-        #file_name = req.headers.get("x-file-name") or req.params.get("file_name")
         pdf_stream = io.BytesIO(pdf_bytes)
         all_values = extract_tables_from_pdf(pdf_stream)
         unique_wells = {}
@@ -308,14 +350,14 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 unique_wells[well] = row
 
         unique_data = list(unique_wells.values())
-        #print("Total number of Unique Wells found:", len(unique_data))
+        print("Total number of Unique Wells found:", len(unique_data))
 
         # Call push_to_sharepoint before updating WellPlanAON entries
         push_to_sharepoint(unique_data)
 
         no_entries_log = []
 
-        # Fetch filtered Wellplanaon entries for each unique well
+        #Fetch filtered Wellplanaon entries for each unique well
         for entry in unique_data:
             rig = entry.get("Rig", "")
             next_loc = entry.get("NextLOC", "")
@@ -359,10 +401,9 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         upload_no_entries_log_to_sharepoint(no_entries_log)
 
         # Print extracted records for verification
-        print("Extracted Records:")
-        for record in all_values:
-            print(record)
-            print(record)
+       # print("Extracted Records:")
+        # for record in all_values:
+        #     print(record)
 
         # Always return a valid JSON response
         result = {
@@ -394,6 +435,7 @@ def parse_date(date_str):
         except Exception:
             continue
     raise ValueError(f"Unrecognized date format: {date_str}")
+
 
 
 
