@@ -4,7 +4,7 @@ import requests
 url = "http://localhost:7071/api/ExtractPDFDetails"
 
 # Path to your test PDF file
-pdf_path = "DDRReport_New.pdf"
+pdf_path = "DDRReport_New-1-100.pdf"
 
 try:
     with open(pdf_path, "rb") as pdf_file:

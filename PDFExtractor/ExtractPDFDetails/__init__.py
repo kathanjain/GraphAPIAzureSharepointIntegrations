@@ -123,13 +123,15 @@ def fetch_filtered_wellplanaon_entries(rig, next_loc, max_retries=3):
     url = f"{GRAPH_BASE}/sites/{site_id}/lists/{list_id}/items"
     headers = graph_headers()
     filter_query = f"fields/RigName eq '{rig}' and fields/WellName eq '{next_loc}'"
-    params = {"$filter": filter_query}
+    params = {"$filter": filter_query,"$expand": "fields"}
     resp = requests.get(url, headers=headers, params=params)
     resp.raise_for_status()
     items = resp.json().get("value", [])
     results = []
     for item in items:
+        #print(">> Full item from Graph response:", json.dumps(item, indent=2))
         fields = item.get("fields", {})
+        #print(">> Raw SharePoint fields:", json.dumps(fields, indent=2))
         start_date = fields.get('StartDate')
         end_date = fields.get('EndDate')
         diff_days = ""
@@ -188,7 +190,11 @@ def upload_no_entries_log_to_sharepoint(no_entries_log, file_name_prefix="NoEntr
     headers["Content-Type"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     resp = requests.put(upload_url, headers=headers, data=excel_buffer.getvalue())
     resp.raise_for_status()
-    print(f"Uploaded file to SharePoint: {file_name}")
+    file_info = resp.json()
+    file_url = file_info.get("webUrl")
+    #print(f"Uploaded file to SharePoint: {file_name}")
+    #print(f"File URL: {file_url}")
+    return file_url
 
 def extract_tables_from_pdf(pdf_stream):
     doc = fitz.open(stream=pdf_stream, filetype="pdf")
@@ -367,22 +373,39 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 for item in filtered:
                     try:
                         next_move_date = entry.get("NextMoveDate", "")
+                        print(f"Next move date:{next_move_date}")
                         if next_move_date:
                             start_date = parse_date(next_move_date)
+                            #print(f"Parsed Start Date: {start_date} (type: {type(start_date)})")
                             item_start_date_str = item.get("StartDate")
+                            #print(f"Str Start Date: {item_start_date_str} (type: {type(item_start_date_str)})")
+                            # Parse item_start_date_str to datetime for accurate comparison
+                            item_start_date = None
+                            if item_start_date_str:
+                                try:
+                                    item_start_date = parse_date(item_start_date_str)
+                                    #print(f"Parsed Item Start Date: {item_start_date} (type: {type(item_start_date)})")
+                                except Exception as ex:
+                                    print(f"Error parsing item_start_date_str: {ex}")
                             # Only update if dates are different
-                            if not item_start_date_str or parse_date(item_start_date_str) != start_date:
+                            if not item_start_date or item_start_date.date() != start_date.date():
                                 diff_days = item.get("DaysDiff")
                                 if diff_days is None or isinstance(diff_days, str):
                                     s = item.get("StartDate")
                                     e = item.get("EndDate")
+                                    print(f"Raw Start: {s}, Raw End: {e}")
                                     if s and e:
-                                        s_dt = parse_date(s)
-                                        e_dt = parse_date(e)
-                                        diff_days = (e_dt - s_dt).days
+                                        try:
+                                            s_dt = parse_date(s)
+                                            e_dt = parse_date(e)
+                                            diff_days = (e_dt - s_dt).days
+                                        except Exception as ex:
+                                            print(f"Error parsing dates: {ex}")
+                                            diff_days = 0
                                     else:
                                         diff_days = 0
                                 end_date = start_date + pd.Timedelta(days=diff_days)
+                                #print(f"StartDate: {start_date}, EndDate: {end_date}, DiffDays: {diff_days}")
                                 update_sharepoint_list_item(item['ID'], start_date, end_date)
                             else:
                                 print(f"Skipped update for item ID {item['ID']} as StartDate matches NextMoveDate")
@@ -398,18 +421,15 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 print(f"No entries found for Well: {next_loc}, Rig: {rig}")
                 no_entries_log.append({"Well": next_loc, "Rig": rig})
 
-        upload_no_entries_log_to_sharepoint(no_entries_log)
+        uploaded_file_url = upload_no_entries_log_to_sharepoint(no_entries_log)
 
-        # Print extracted records for verification
-       # print("Extracted Records:")
-        # for record in all_values:
-        #     print(record)
 
         # Always return a valid JSON response
         result = {
             "message": "PDF processed successfully!",
             "tables_extracted": len(all_values),
-            "Total number of Unique Wells found:": len(unique_data)
+            "Total number of Unique Wells found:": len(unique_data),
+            "uploaded_file_url": uploaded_file_url
         }
         return func.HttpResponse(
             body=json.dumps(result, indent=4),
@@ -426,14 +446,25 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 def parse_date(date_str):
     """
     Parse a date string in various formats to a datetime object.
-    Supported formats: 'dd/mm/yyyy', 'yyyy-mm-dd', 'MMM dd yyyy', etc.
+    Supported formats: 'dd/mm/yyyy', 'yyyy-mm-dd', 'MMM dd yyyy', ISO 8601, etc.
     """
     from datetime import datetime
-    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%b %d %Y"):
+    import re
+    # Remove trailing Z if present
+    date_str = date_str.strip()
+    if date_str.endswith("Z"):
+        date_str = date_str[:-1]
+    # Try known formats
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%b %d %Y", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
         try:
             return datetime.strptime(date_str, fmt)
         except Exception:
             continue
+    # Try to parse with pandas if all else fails
+    try:
+        return pd.to_datetime(date_str)
+    except Exception:
+        pass
     raise ValueError(f"Unrecognized date format: {date_str}")
 
 
