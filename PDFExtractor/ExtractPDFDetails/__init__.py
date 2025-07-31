@@ -393,7 +393,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                                 if diff_days is None or isinstance(diff_days, str):
                                     s = item.get("StartDate")
                                     e = item.get("EndDate")
-                                    print(f"Raw Start: {s}, Raw End: {e}")
+                                    #print(f"Raw Start: {s}, Raw End: {e}")
                                     if s and e:
                                         try:
                                             s_dt = parse_date(s)
