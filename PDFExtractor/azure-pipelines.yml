@@ -1,0 +1,31 @@
+trigger:
+- main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  artifactName: 'drop'
+
+steps:
+- task: UsePythonVersion@0
+  inputs:
+    versionSpec: '3.11'
+
+- script: |
+    python -m pip install --upgrade pip
+    pip install -r requirements.txt
+  displayName: 'Install Dependencies'
+
+- task: ArchiveFiles@2
+  inputs:
+    rootFolderOrFile: '$(System.DefaultWorkingDirectory)'
+    includeRootFolder: false
+    archiveType: 'zip'
+    archiveFile: '$(Build.ArtifactStagingDirectory)/functionapp.zip'
+    replaceExistingArchive: true
+
+- task: PublishBuildArtifacts@1
+  inputs:
+    PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+    ArtifactName: '$(artifactName)'
