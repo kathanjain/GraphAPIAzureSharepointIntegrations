@@ -46,7 +46,7 @@ def graph_headers():
 
 def get_site_id():
     # Extract tenant domain and site name from full site URL
-    site_hostname = SITE_URL.split("/")[2]  # "slb001.sharepoint.com"
+    site_hostname = SITE_URL.split("/")[2]  
     site_path = "/" + "/".join(SITE_URL.split("/")[3:])  # "/sites/ADNOCDevelopment
     
     # Format URL as per Microsoft Graph recommendations
