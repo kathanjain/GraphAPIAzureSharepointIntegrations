@@ -79,16 +79,17 @@ def safe_strip(val):
         return ""
     return str(val).strip()
 
-def push_to_sharepoint(values, max_retries=3):
+def push_to_sharepoint(values, sharepoint_item_id=None, max_retries=3):
     site_id = get_site_id()
     list_id = get_list_id(site_id, LIST_NAME)
     url = f"{GRAPH_BASE}/sites/{site_id}/lists/{list_id}/items"
     headers = graph_headers()
     headers["Content-Type"] = "application/json"
     for value in values:
+        title_value = str(sharepoint_item_id) if sharepoint_item_id else str(value.get("Date", ""))
         item_properties = {
             "fields": {
-                "Title": str(value.get("Date", "")),
+                "Title": title_value,
                 "Rig": str(value.get("Rig", "")),
                 "Well": str(value.get("Well", "")),
                 "BP": str(value.get("BP", "")),
@@ -340,6 +341,9 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     logging.info("Python HTTP trigger function processed a request.")
 
     try:
+        # Get SharePoint item ID from headers
+        sharepoint_item_id = req.headers.get("sharepoint-item-id")
+
         # Get PDF bytes from HTTP request body
         pdf_bytes = req.get_body()
         if not pdf_bytes:
@@ -359,7 +363,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         print("Total number of Unique Wells found:", len(unique_data))
 
         # Call push_to_sharepoint before updating WellPlanAON entries
-        push_to_sharepoint(unique_data)
+        push_to_sharepoint(unique_data, sharepoint_item_id=sharepoint_item_id)
 
         no_entries_log = []
 
